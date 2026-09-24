@@ -623,9 +623,63 @@ begin
   Result := pStack;
 end;
 
+// Format the stack captured for an exception, skipping the raise-machinery
+// frames that only clutter the trace. They are identified by name (their exact
+// set/count depends on the RTL version), and only the duplicate of the very
+// first frame - the injected exception address followed by the raise site of
+// the same function - is dropped; deeper identical frames (e.g. real
+// recursion) are preserved.
+function ExceptionStackToStr(const Stack: TDbgInfoStack): string;
+const
+  SkipSubstrs: array[0..3] of string = (
+    'GetExceptionStackInfo',
+    'RaisingException',
+    'RaiseExcept',
+    'InternalRaiseAtExcept');
+var
+  Ptr, FirstAddr: Pointer;
+  AddrInfo: TMapFileAddrInfo;
+  Fmt, Name: string;
+  KeptCount: Integer;
+  SkipIt: Boolean;
+  I: Integer;
+begin
+  Result := '';
+  FirstAddr := nil;
+  KeptCount := 0;
+  for Ptr in Stack do
+  begin
+    if Ptr = nil then Break;
+    Fmt := Format('$%p', [Ptr]);
+    SkipIt := False;
+    Name := '';
+    if MapFileAvailable and GetAddrInfo(Ptr, AddrInfo) then
+    begin
+      Fmt := Fmt + ' ' + AddrInfoToString(AddrInfo);
+      Name := AddrInfo.PublicName;
+      for I := Low(SkipSubstrs) to High(SkipSubstrs) do
+        if Pos(SkipSubstrs[I], Name) > 0 then
+        begin
+          SkipIt := True;
+          Break;
+        end;
+    end;
+    if not SkipIt then
+    begin
+      Inc(KeptCount);
+      if KeptCount = 1 then
+        FirstAddr := Ptr
+      else if (KeptCount = 2) and (Ptr = FirstAddr) then
+        SkipIt := True;
+    end;
+    if not SkipIt then
+      AddStr(Result, Fmt, NL);
+  end;
+end;
+
 function GetStackInfoStringProc(Info: Pointer): string;
 begin
-  Result := CallStackToStr(PDbgInfoStack(Info)^);
+  Result := ExceptionStackToStr(PDbgInfoStack(Info)^);
 end;
 
 procedure CleanUpStackInfoProc(Info: Pointer);
