@@ -650,20 +650,27 @@ begin
   for Ptr in Stack do
   begin
     if Ptr = nil then Break;
-    Fmt := Format('$%p', [Ptr]);
     SkipIt := False;
+    Fmt := '';
     Name := '';
+    // Keep only frames that resolved to a function name; an address without a
+    // name (outside the map, or a line-only match) is useless in the trace.
     if MapFileAvailable and GetAddrInfo(Ptr, AddrInfo) then
-    begin
-      Fmt := Fmt + ' ' + AddrInfoToString(AddrInfo);
-      Name := AddrInfo.PublicName;
-      for I := Low(SkipSubstrs) to High(SkipSubstrs) do
-        if Pos(SkipSubstrs[I], Name) > 0 then
-        begin
-          SkipIt := True;
-          Break;
-        end;
-    end;
+      if Trim(AddrInfo.PublicName) = '' then
+        SkipIt := True
+      else
+      begin
+        Fmt := Format('$%p', [Ptr]) + ' ' + AddrInfoToString(AddrInfo);
+        Name := AddrInfo.PublicName;
+        for I := Low(SkipSubstrs) to High(SkipSubstrs) do
+          if Pos(SkipSubstrs[I], Name) > 0 then
+          begin
+            SkipIt := True;
+            Break;
+          end;
+      end
+    else
+      SkipIt := True;
     if not SkipIt then
     begin
       Inc(KeptCount);
