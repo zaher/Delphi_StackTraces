@@ -99,7 +99,9 @@ var
   // may be loaded at a different (ASLR-randomized) base. RelocDelta is the
   // difference between the actual load base and the preferred base; runtime
   // addresses are shifted by it before being compared against map addresses.
-  RelocDelta: NativeUInt;
+  // Signed: the module may be loaded above or below its preferred base, so the
+  // delta can be negative. Computing it as an unsigned value would overflow.
+  RelocDelta: Int64;
 
 resourcestring
   S_EMF_ReadingNoSection = 'Error reading map file: no section "%s" found';
@@ -451,7 +453,10 @@ end;
 // module was actually loaded at runtime (ASLR may relocate it).
 // The in-memory PE header's ImageBase field is rewritten by the loader to the
 // actual load address, so the preferred base is read from the image file.
-function GetRelocDelta: NativeUInt;
+// @returns   Signed delta; negative if the module was loaded below its
+//            preferred base. Unsigned subtraction here would raise
+//            EIntOverflow in that case, so the values are cast to Int64.
+function GetRelocDelta: Int64;
 const
   MaxPeHdrSize = 4096; // enough to cover the IMAGE_NT_HEADERS of any image
 var
@@ -482,10 +487,10 @@ begin
   finally
     CloseHandle(hFile);
   end;
-  Result := NativeUInt(hMod) - PrefBase;
+  Result := Int64(NativeUInt(hMod)) - Int64(PrefBase);
 end;
 {$ELSE}
-function GetRelocDelta: NativeUInt;
+function GetRelocDelta: Int64;
 begin
   Result := 0;
 end;
@@ -547,8 +552,9 @@ begin
   if not MapFileAvailable
     then Result := False
     // Shift the runtime address by the relocation delta to get the address in
-    // the MAP file's coordinate space (see RelocDelta comment)
-    else Result := GetAddrInfo(Pointer(NativeUInt(Addr) - RelocDelta), LineAddrs, PublicAddrs, AddrInfo);
+    // the MAP file's coordinate space (see RelocDelta comment). Signed
+    // arithmetic: the delta may be negative.
+    else Result := GetAddrInfo(Pointer(Int64(NativeUInt(Addr)) - RelocDelta), LineAddrs, PublicAddrs, AddrInfo);
 end;
 
 function AddrInfoToString(const AddrInfo: TMapFileAddrInfo): string;
