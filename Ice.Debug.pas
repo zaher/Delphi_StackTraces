@@ -168,15 +168,50 @@ begin
   Result := Pointer(uRes);
 end;
 
+function CleanSpaces(const Input: string): string;
+var
+  I, OutIdx: Integer;
+  InSpace: Boolean;
+begin
+  SetLength(Result, Length(Input));
+  OutIdx := 0;
+  InSpace := False;
+
+  for I := 1 to Length(Input) do
+  begin
+    if Input[I] = ' ' then
+    begin
+      if not InSpace then
+      begin
+        Inc(OutIdx);
+        Result[OutIdx] := ' ';
+        InSpace := True;
+      end;
+    end
+    else
+    begin
+      Inc(OutIdx);
+      Result[OutIdx] := Input[I];
+      InSpace := False;
+    end;
+  end;
+  SetLength(Result, OutIdx);
+end;
+
 // Loops through array of strings starting from an index until a string to search is found
 // @returns Whether search string is found and is not the last element in array
 function LocateSection(const arr: TStrArray; var CurrIdx: Integer; const SectionHeader: string): Boolean;
-var HighArr: Integer;
+var
+  HighArr: Integer;
+  Header, WithHeader: string;
 begin
   HighArr := High(arr);
+  WithHeader := Trim(CleanSpaces(SectionHeader));
+
   while CurrIdx < HighArr do // we want at least one line after stopline
   begin
-    if arr[CurrIdx] = SectionHeader then
+    Header := Trim(CleanSpaces(arr[CurrIdx]));
+    if Header = WithHeader then
     begin
       Inc(CurrIdx); // Move to next line after stopline
       Exit(True);
