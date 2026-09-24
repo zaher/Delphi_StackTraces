@@ -95,6 +95,11 @@ var
   MapFileAvailable: Boolean;
   LineAddrs: TArray<TMapFileLineAddrInfo>;
   PublicAddrs: TArray<TMapFilePublicAddrInfo>;
+  // MAP files are written for the module's preferred image base, but the module
+  // may be loaded at a different (ASLR-randomized) base. RelocDelta is the
+  // difference between the actual load base and the preferred base; runtime
+  // addresses are shifted by it before being compared against map addresses.
+  RelocDelta: NativeUInt;
 
 resourcestring
   S_EMF_ReadingNoSection = 'Error reading map file: no section "%s" found';
@@ -122,24 +127,43 @@ const
 type
   TMapFileSegmentStartAddrs = array[1..MaxSegments] of Pointer; // segment number => starting address
 
-// Read address of a "0002:0001FDEF" kind from string starting at index
+// Read address of a "0002:0001FDEF" / "0001:0000000000401000" kind from string
+// starting at index. Segment is fixed 4 hex digits, offset may be 1..16 hex
+// digits (64-bit linkers write full 64-bit offsets, e.g. in the segments header)
 //   StartIdx - [IN] Index to start at, [OUT] Index rigth after the address
 // @raises Exception if address is invalid
 procedure ReadAddr(const S: string; var StartIdx: Integer; out Segment: Integer; out Addr: Pointer); overload;
 var
   ErrIdx: Integer;
+  OfsLen: Integer;
 begin
-  if Length(S) < StartIdx - 1 + AddrLen then
+  if Length(S) < StartIdx - 1 + AddrSegmLen + 1 then
     raise Err(S_EMF_ReadAddrIdx, [S, StartIdx]);
   Segment := HexToUInt(PChar(Pointer(S)) + StartIdx - 1, AddrSegmLen, ErrIdx);
   if ErrIdx <> 0 then
     raise Err(S_EMF_ReadAddrIdx, [S, StartIdx]);
   if S[StartIdx - 1 + AddrSegmLen + 1] <> AddrSep then
     raise Err(S_EMF_ReadAddrIdx, [S, StartIdx]);
-  Addr := Pointer(HexToUInt(PChar(Pointer(S)) + StartIdx - 1 + AddrSegmLen + 1, AddrOfsLen, ErrIdx));
+  Inc(StartIdx, AddrSegmLen + 1);
+  // Read the offset: all consecutive hex digits up to the end of the line
+  OfsLen := 0;
+  while (StartIdx <= Length(S)) and (OfsLen < 16) do
+  begin
+    case S[StartIdx] of
+      '0'..'9', 'A'..'F', 'a'..'f':
+        begin
+          Inc(OfsLen);
+          Inc(StartIdx);
+        end;
+    else
+      Break;
+    end;
+  end;
+  if OfsLen = 0 then
+    raise Err(S_EMF_ReadAddrIdx, [S, StartIdx]);
+  Addr := Pointer(HexToUInt(PChar(Pointer(S)) + StartIdx - 1 - OfsLen, OfsLen, ErrIdx));
   if ErrIdx <> 0 then
     raise Err(S_EMF_ReadAddrIdx, [S, StartIdx]);
-  Inc(StartIdx, AddrLen);
 end;
 
 // Skip spaces in string starting from an index, return whether a non-space char
@@ -421,10 +445,57 @@ begin
     end);
 end;
 
+{$IFDEF MSWINDOWS}
+// Difference between the address space used by the MAP file (built for the
+// preferred image base from the PE header) and the address space where the
+// module was actually loaded at runtime (ASLR may relocate it).
+// The in-memory PE header's ImageBase field is rewritten by the loader to the
+// actual load address, so the preferred base is read from the image file.
+function GetRelocDelta: NativeUInt;
+const
+  MaxPeHdrSize = 4096; // enough to cover the IMAGE_NT_HEADERS of any image
+var
+  hMod: HMODULE;
+  hFile: THandle;
+  br: Cardinal;
+  Buf: array[0..MaxPeHdrSize - 1] of Byte;
+  DosHdr: PImageDosHeader;
+  NtHdr: PImageNtHeaders;
+  PrefBase, NtHdrOfs, NtHdrSize: NativeUInt;
+begin
+  Result := 0;
+  hMod := GetModuleHandle(nil);
+  if hMod = 0 then Exit;
+  hFile := CreateFile(PChar(ParamStr(0)), GENERIC_READ, FILE_SHARE_READ, nil, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, 0);
+  if hFile = INVALID_HANDLE_VALUE then Exit;
+  try
+    if not ReadFile(hFile, Buf, SizeOf(Buf), br, nil) then Exit;
+    if br < SizeOf(TImageDosHeader) then Exit;
+    DosHdr := PImageDosHeader(@Buf[0]);
+    if DosHdr^.e_magic <> IMAGE_DOS_SIGNATURE then Exit;
+    NtHdrOfs := DosHdr^._lfanew;
+    NtHdrSize := SizeOf(TImageNtHeaders);
+    if (NtHdrOfs = 0) or (NtHdrOfs + NtHdrSize > br) then Exit;
+    NtHdr := PImageNtHeaders(@Buf[NtHdrOfs]);
+    if NtHdr^.Signature <> IMAGE_NT_SIGNATURE then Exit;
+    PrefBase := NativeUInt(NtHdr^.OptionalHeader.ImageBase);
+  finally
+    CloseHandle(hFile);
+  end;
+  Result := NativeUInt(hMod) - PrefBase;
+end;
+{$ELSE}
+function GetRelocDelta: NativeUInt;
+begin
+  Result := 0;
+end;
+{$ENDIF}
+
 procedure ReadMapFile(const MapFile: string);
 begin
   ReadMapFile(MapFile, LineAddrs, PublicAddrs);
   MapFileAvailable := True;
+  RelocDelta := GetRelocDelta;
 end;
 
 function GetAddrInfo(Addr: Pointer; const LineAddrs: TArray<TMapFileLineAddrInfo>;
@@ -475,7 +546,9 @@ function GetAddrInfo(Addr: Pointer; out AddrInfo: TMapFileAddrInfo): Boolean;
 begin
   if not MapFileAvailable
     then Result := False
-    else Result := GetAddrInfo(Addr, LineAddrs, PublicAddrs, AddrInfo);
+    // Shift the runtime address by the relocation delta to get the address in
+    // the MAP file's coordinate space (see RelocDelta comment)
+    else Result := GetAddrInfo(Pointer(NativeUInt(Addr) - RelocDelta), LineAddrs, PublicAddrs, AddrInfo);
 end;
 
 function AddrInfoToString(const AddrInfo: TMapFileAddrInfo): string;
